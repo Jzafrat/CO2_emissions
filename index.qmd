@@ -1,0 +1,331 @@
+---
+title : "CO2 emissions per capita"
+format: dashboard
+theme: journal
+---
+
+```{r include=FALSE, message=FALSE, echo=FALSE}
+# check for ideas: https://ourworldindata.org/co2-emissions
+# check: https://alyssapradhan.github.io/RMC_final/#home
+```
+
+```{r include=FALSE, message=FALSE, echo=FALSE}
+
+if (!require(pacman)) install.packages(pacman)
+pacman::p_load(tidyverse,
+               here,
+               bslib, 
+               bsicons,
+               rnaturalearth, 
+               plotly, 
+               countrycode, 
+               htmltools, 
+               reactable,
+               janitor,
+               sf,
+               gganimate
+               )
+```
+
+```{r include=FALSE, message=FALSE, echo=FALSE}
+
+co2_emission <- read_csv(here("data/co2_pcap_cons.csv"))
+
+co2_emission_2022 <- co2_emission %>% 
+  select("country", "2022") %>% 
+  rename(co2_2022 = "2022")
+
+pop <- read_csv(here("data/pop.csv")) %>% 
+  mutate(across(!country, ~as.character(.) %>% 
+                           str_replace_all("k", "e3") %>% 
+                           str_replace_all("M", "e6") %>% 
+                           str_replace_all("B", "e9") %>% 
+                           as.numeric()))
+
+pop_2022 <- pop %>% 
+  select("country", "2022") %>% 
+  rename(pop_2022 = "2022") 
+
+setdiff(pop_2022$country, co2_emission_2022$country) #3 countries not present in the CO2
+setdiff(co2_emission_2022$country, pop_2022$country)
+
+co2_pop_2022 <- left_join(co2_emission_2022, pop_2022) %>% 
+  mutate(co2_total = co2_2022*pop_2022)
+
+highest_co2 <- co2_pop_2022 %>% 
+  arrange(-co2_2022) %>% 
+  head(1) %>% 
+  pull(co2_2022) %>% 
+  round(digits = 2)
+
+highest_co2_country <- co2_pop_2022 %>% 
+  arrange(-co2_2022) %>% 
+  head(1) %>% 
+  pull(country)
+
+lowest_co2 <- co2_pop_2022 %>% 
+  arrange(co2_2022) %>% 
+  head(1) %>% 
+  pull(co2_2022) %>% 
+  round(digits = 2)
+
+lowest_co2_country <- co2_pop_2022 %>% 
+  arrange(co2_2022) %>% 
+  head(1) %>% 
+  pull(country)
+
+average_co2 <- co2_pop_2022 %>% 
+  summarise(average = sum(co2_total)/sum(pop_2022)) %>% 
+  round(1)
+
+```
+
+```{r include=FALSE, message=FALSE, echo=FALSE}
+
+# importing the shape data
+country_shapes <- rnaturalearth::ne_countries() 
+
+# cleaning shape data
+co2_emission <- co2_emission %>% 
+  mutate(country_code = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+# checking for unmatched countries
+setdiff(country_shapes$adm0_a3, co2_emission$country_code)
+setdiff(co2_emission$country_code, country_shapes$adm0_a3)
+
+# cleaning CO2 dataset: transform variables to numeric and grouping in decades
+co2_emission_long_decade <- co2_emission %>% 
+  mutate(across(.cols = c("2003", "2004", "2005", "2006", "2011", "2012", "2013"), .fns = as.numeric)) %>% 
+  pivot_longer(cols = !c("country","country_code"), names_to = "year", values_to = "co2") %>% 
+    mutate(year = as.numeric(year)) %>% 
+   drop_na(year, co2) %>%
+  mutate(decade = floor(year/10)*10) %>%  # Grouping into decades
+  group_by(country_code, decade) %>%
+  summarize(co2 = mean(co2, na.rm = TRUE)) %>%  # Mean CO2 for each decade and country
+  ungroup()
+
+# Joining CO2 and shape data
+co2_shapes <- inner_join(country_shapes, co2_emission_long_decade, by = c("adm0_a3" = "country_code"))
+
+# Mapping: testing gganimate versus ggplot
+map <- co2_shapes %>% 
+  ggplot(aes(fill = co2,
+             frame = decade)) +
+  geom_sf() +
+  theme_void() +
+  scale_fill_gradientn(colors = c("darkblue", "lightblue", "yellow", "red", "darkred"), na.value = "gray90") +
+  labs(title = "CO2 emission: {closest_state}") +  # Add dynamic title showing decade
+  transition_states(decade, transition_length = 2, state_length = 1) +
+  ease_aes('linear')  # Optional easing for smoother animation
+  
+map_anim <- animate(map, nframes = 100, fps = 10)
+anim_save("co2_map_animation.gif")
+
+#map_anim
+
+#when creating the maps with ggplotly, some sountry shapes do not show.
+#when using gganimate, the image is not interactive
+
+map2 <- co2_shapes %>% 
+  ggplot(aes(fill = co2,
+             frame = decade)) +
+  geom_sf() +
+  coord_sf() +
+  theme_void() +
+  scale_fill_gradientn(colors = c("darkblue", "lightblue", "yellow", "red", "darkred"), na.value = "gray90")
+
+map_plotly <- ggplotly(map2) %>% 
+  animation_opts(frame = 100, transition = 0, redraw = FALSE)
+
+# Finally decided to use plot_geo
+co2_min <- min(co2_shapes$co2, na.rm = TRUE)
+co2_max <- max(co2_shapes$co2, na.rm = TRUE)
+
+map_plotly2 <- plot_geo(co2_shapes, locationmode = 'adm0_iso') %>%
+  add_trace(
+    z = ~co2,
+    locations = ~adm0_iso, 
+    frame = ~decade,
+    color = ~co2,
+    zmin = co2_min,
+    zmax = co2_max,
+    colorbar = list(title = "CO2 Emissions")) %>% 
+  layout(
+    title = "Global CO2 Emissions Over Time",
+     geo = list(scope = 'world') 
+  )
+```
+
+
+```{r include=FALSE, message=FALSE, echo=FALSE}
+#trends
+co2_emission_long <- co2_emission %>% 
+  mutate(across(.cols = c("2003", "2004", "2005", "2006", "2011", "2012", "2013"), .fns = as.numeric)) %>% 
+  pivot_longer(cols = !c("country","country_code"), names_to = "year", values_to = "co2") %>% 
+  mutate(year = as.numeric(year))
+
+continent <- country_shapes %>% 
+  select(adm0_a3, continent, region_un)
+
+co2_emission_long_shapes <- inner_join(continent, co2_emission_long, by = c("adm0_a3" = "country_code"))
+
+#top10_countries <- co2_emission %>% 
+#  arrange(-`2022`) %>% 
+#  head(10) %>% 
+#  pull(country)
+
+trends <- co2_emission_long_shapes %>%
+  mutate(tooltip_label = paste0("Country: ", country,
+                                "\nCO2: ", co2,
+                                "\nYear: ", year)) %>% 
+  ggplot(mapping = aes(x = year,
+                       y = co2,
+                       group = country,
+                       color = continent,
+                       text = tooltip_label)) +
+  geom_line() +
+  labs(title = "CO2 emission per country over the years",
+       x = "CO2 emission",
+       y = "Year",
+       color = "Continent")
+
+trends_plotly <- ggplotly(trends, tooltip = "text")
+trends_plotly
+```
+
+```{r include=FALSE, message=FALSE, echo=FALSE}
+#GDP versus CO2
+
+gdp <- read_csv(here("data/gdp_pcap.csv")) %>% 
+  mutate(across(.cols = !country, .fns = as.numeric)) %>% 
+  pivot_longer(cols = !c("country"),
+               names_to = "year",
+               values_to = "gdp") %>% 
+  mutate(year = as.numeric(year))
+
+gdp_co2 <- inner_join(gdp, co2_emission_long)
+
+gdp_co2_continent <- inner_join(continent, gdp_co2, by = c("adm0_a3" = "country_code"))
+
+scatter <- 
+  gdp_co2_continent %>% 
+  mutate(tooltip_label = paste0("Country: ", country,
+                                "\nGDP: ", gdp,
+                                "\nCO2: ", co2)) %>% 
+  ggplot(mapping = aes(x = co2,
+                       y = gdp,
+                       color = continent,
+                       frame = year,
+                       group = year,
+                       text = tooltip_label)) +
+  geom_point() +
+  geom_smooth(method = "lm", aes(group = year), se = FALSE, color = "grey", linetype = "dotted", size = 1) +
+  labs(title = "CO2 emission per GDP per capita (1800 to 2022)",
+       x = "CO2 emission",
+       y = "GDP per capita",
+       color = "Continent") +
+  xlim(0, 30)
+  
+
+scatter_plotly <- ggplotly(scatter, tooltip = "text")
+
+
+```
+
+# Home
+
+## {height=30%}
+
+```{r}
+
+value_box(
+  title = "Highest CO2 emission per capita",
+  value = highest_co2,
+  showcase = bsicons::bs_icon("fire"),
+  theme = value_box_theme(bg = "salmon"),
+  p(paste0("(" ,highest_co2_country," - year 2022",")"))
+)
+
+```
+
+
+```{r}
+
+value_box(
+  title = "Lowest CO2 emission per capita",
+  value = lowest_co2,
+  showcase = bsicons::bs_icon("tree"),
+  theme = value_box_theme(bg = "salmon"),
+  p(paste0("(" ,lowest_co2_country, " - year 2022",")"))
+)
+
+```
+
+
+```{r}
+value_box(
+  title = "Average CO2 emission per capita in 2022",
+  value = average_co2,
+  showcase = bsicons::bs_icon("arrows-collapse"),
+  theme = value_box_theme(bg = "salmon")
+)
+```
+
+
+## {height=65%} {.tabset}
+
+### Introduction
+
+Carbon dioxide (CO2) is a gas that originates from the extraction and burning of fossil fuels (such as coal, oil, and natural gas), from wildfires, and natural processes (e.g., volcanic eruptions). 
+
+The emissions of this heat trapping gas, or greenhouse gas, have increased greatly since the 18th century. In this dashboard we present: a map showing the CO2 emissions per country, the trends in CO2 emissions per country grouped by continent, and a graph showing the correlation between GDP and CO2 emissions per country grouped by continent. All data is presented for the last 2 centuries.
+
+More information on the data used can be found on the About section, and the data is available for download in the Data section.
+
+### Map 
+
+```{r message=FALSE, echo=FALSE}
+map_plotly2
+```
+
+### Trends
+
+```{r message=FALSE, echo=FALSE}
+trends_plotly
+```
+
+### GDP versus CO2
+
+```{r message=FALSE, echo=FALSE}
+scatter_plotly
+```
+
+# Data
+
+The date used in this dashboard is shown below and can be downloaded as a csv.
+
+```{r message=FALSE, echo=FALSE}
+
+htmltools::browsable(
+  tagList(
+    reactable(co2_emission, 
+              searchable = TRUE,
+              filterable = TRUE,
+              elementId = "co2-table"),
+tags$div(
+      tags$button("Download as CSV",
+                  onclick = htmlwidgets::JS("Reactable.downloadDataCSV('co2-table')"))
+  )
+))
+
+```
+
+# About
+
+Carbon dioxide emissions are those stemming from the burning of fossil fuels and the manufacture of cement. They include carbon dioxide produced during consumption of solid, liquid, and gas fuels and gas flaring. In the data used, the CO2 emissions are measures in tonnes per capita.
+
+Carbon dioxide is Earth’s most important greenhouse gas as it absorbs and radiates heat. Without carbon dioxide, Earth’s natural greenhouse effect would be too weak to keep the average global surface temperature above freezing. By adding more carbon dioxide to the atmosphere, people are supercharging the natural greenhouse effect, causing global temperature to rise.
+
+Another reason carbon dioxide is important in the Earth system is that it dissolves into the ocean like the fizz in a can of soda. It reacts with water molecules, producing carbonic acid and lowering the ocean's pH (raising its acidity). Since the start of the Industrial Revolution, the pH of the ocean's surface waters has dropped from 8.21 to 8.10. This drop in pH is called ocean acidification.
+
+Information taken from: **Climate change: Atmospheric Carbon Dioxide** <https://www.climate.gov/news-features/understanding-climate/climate-change-atmospheric-carbon-dioxide>
